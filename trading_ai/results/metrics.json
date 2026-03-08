@@ -1,0 +1,11 @@
+{
+  "data_provider": "yahoo",
+  "tickers": null,
+  "periods": 1200,
+  "seed": 42,
+  "top_n": 10,
+  "rows_in_dataset": 60000,
+  "backtest_days": 951,
+  "total_return": 2.14371479177235,
+  "annualized_sharpe": 1.0310754401800604
+}

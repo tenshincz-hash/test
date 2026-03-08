@@ -1,0 +1,18 @@
+{
+  "data_provider": "yahoo",
+  "tickers_count": 50,
+  "periods": 1200,
+  "seed": 42,
+  "top_n": 10,
+  "original": {
+    "total_return": -0.6042405807606788,
+    "annualized_sharpe": -0.6873311346397235,
+    "backtest_days": 951
+  },
+  "inverted": {
+    "total_return": -0.75608160279838,
+    "annualized_sharpe": -1.119620344640469,
+    "backtest_days": 951
+  },
+  "likely_inverted_signal": false
+}

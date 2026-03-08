@@ -1,0 +1,9 @@
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.4
+lightgbm>=4.5
+yfinance>=0.2.54
+matplotlib>=3.8
+
+[dev]
+pytest>=8.0

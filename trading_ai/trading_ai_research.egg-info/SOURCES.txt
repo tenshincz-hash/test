@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+tests/test_pipeline.py
+tests/test_sentiment.py
+trading_ai_research.egg-info/PKG-INFO
+trading_ai_research.egg-info/SOURCES.txt
+trading_ai_research.egg-info/dependency_links.txt
+trading_ai_research.egg-info/requires.txt
+trading_ai_research.egg-info/top_level.txt
