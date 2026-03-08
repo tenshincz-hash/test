@@ -1,0 +1,16 @@
+{
+  "data_provider": "mock",
+  "tickers": null,
+  "periods": 520,
+  "seed": 42,
+  "top_n": 10,
+  "rebalance_frequency": "weekly",
+  "rows_in_dataset": 3120,
+  "backtest_days": 271,
+  "total_return": 0.056849292636839355,
+  "annualized_sharpe": 1.2491069658233118,
+  "cost_adjusted_return": 0.056849292636839355,
+  "cost_adjusted_sharpe": 1.2491069658233118,
+  "benchmark_return": 0.0,
+  "excess_return": 0.056849292636839355
+}

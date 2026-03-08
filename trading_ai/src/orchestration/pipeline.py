@@ -24,6 +24,7 @@ class ResearchConfig:
     seed: int = 42
     data_provider: str = "mock"
     top_n: int = 10
+    rebalance_frequency: str = "daily"
 
 
 class TradingResearchPipeline:
@@ -53,6 +54,11 @@ class TradingResearchPipeline:
     ]
 
     def __init__(self, config: ResearchConfig) -> None:
+        if config.rebalance_frequency not in {"daily", "weekly", "biweekly"}:
+            raise ValueError(
+                f"Unsupported rebalance_frequency='{config.rebalance_frequency}'. "
+                "Use one of: daily, weekly, biweekly."
+            )
         self.config = config
         self.store = InMemoryDataStore()
 
@@ -81,9 +87,13 @@ class TradingResearchPipeline:
         portfolio = PortfolioConstructor(top_n=max(1, self.config.top_n)).build_weights(scores)
         vol_snapshot = labeled[["date", "ticker", "vol_20d"]].drop_duplicates()
         risk_adjusted = RiskManager().apply(portfolio[["date", "ticker", "weight"]], vol_snapshot)
+        scheduled = self._apply_rebalance_schedule(
+            risk_adjusted,
+            frequency=self.config.rebalance_frequency,
+        )
 
         execution = ExecutionSimulator()
-        performance = execution.simulate(risk_adjusted, prices)
+        performance = execution.simulate(scheduled, prices)
 
         sharpe = self._annualized_sharpe(performance["strategy_return"]) if not performance.empty else float("nan")
 
@@ -92,7 +102,7 @@ class TradingResearchPipeline:
             "news": news,
             "dataset": labeled,
             "scores": scores,
-            "portfolio": risk_adjusted,
+            "portfolio": scheduled,
             "constructed_portfolio": portfolio,
             "performance": performance,
             "sharpe": sharpe,
@@ -103,3 +113,33 @@ class TradingResearchPipeline:
         if returns.std(ddof=0) == 0:
             return 0.0
         return float(np.sqrt(252) * returns.mean() / returns.std(ddof=0))
+
+    @staticmethod
+    def _rebalance_step(frequency: str) -> int:
+        if frequency == "daily":
+            return 1
+        if frequency == "weekly":
+            return 5
+        if frequency == "biweekly":
+            return 10
+        raise ValueError(f"Unsupported rebalance_frequency='{frequency}'")
+
+    @classmethod
+    def _apply_rebalance_schedule(cls, portfolio: pd.DataFrame, frequency: str) -> pd.DataFrame:
+        if portfolio.empty or frequency == "daily":
+            return portfolio
+
+        step = cls._rebalance_step(frequency)
+        out = portfolio.copy()
+        unique_dates = sorted(pd.to_datetime(out["date"]).unique())
+        rebalance_dates = set(unique_dates[::step])
+        out = out.sort_values(["ticker", "date"])
+        out["is_rebalance_date"] = out["date"].isin(rebalance_dates)
+        out["weight"] = (
+            out["weight"]
+            .where(out["is_rebalance_date"])
+            .groupby(out["ticker"])
+            .ffill()
+            .fillna(0.0)
+        )
+        return out.drop(columns=["is_rebalance_date"])

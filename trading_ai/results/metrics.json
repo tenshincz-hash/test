@@ -4,8 +4,13 @@
   "periods": 1200,
   "seed": 42,
   "top_n": 10,
+  "rebalance_frequency": "weekly",
   "rows_in_dataset": 60000,
   "backtest_days": 951,
-  "total_return": 2.14371479177235,
-  "annualized_sharpe": 1.0310754401800604
+  "total_return": 3.4583866239407186,
+  "annualized_sharpe": 1.2596299887947422,
+  "cost_adjusted_return": 3.4583866239407186,
+  "cost_adjusted_sharpe": 1.2596299887947422,
+  "benchmark_return": 0.8187002675400661,
+  "excess_return": 2.6396863564006523
 }
