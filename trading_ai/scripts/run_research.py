@@ -19,7 +19,7 @@ SP500_50_TICKERS = [
     "ACN", "IBM", "LIN", "MCD", "ABT", "PM", "GE", "AMD", "INTU", "DIS",
     "TXN", "T", "VZ", "CAT", "PFE", "AMGN", "QCOM", "NOW", "SPGI", "INTC",
 ]
-ROBUSTNESS_PERIODS = [500, 800, 1200, 1600]
+ROBUSTNESS_PERIODS = [500, 800, 1200, 1600, 2000]
 
 
 def _download_spy_prices(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
@@ -220,13 +220,24 @@ def main() -> None:
                 seed=args.seed,
                 data_provider=args.data_provider,
                 top_n=args.top_n,
-                rebalance_frequency=args.rebalance_frequency,
+                rebalance_frequency="weekly",
             )
             robustness_results = TradingResearchPipeline(robustness_config).run()
             robustness_perf = robustness_results["performance"]
             robustness_total_return = (
                 robustness_perf["equity_curve"].iloc[-1] - 1 if not robustness_perf.empty else 0.0
             )
+            robustness_benchmark_return = 0.0
+            robustness_excess_return = float(robustness_total_return)
+            if not robustness_perf.empty:
+                robustness_prices = robustness_results["prices"]
+                robust_start = pd.to_datetime(robustness_prices["date"]).min()
+                robust_end = pd.to_datetime(robustness_prices["date"]).max()
+                robust_spy = _download_spy_prices(robust_start, robust_end)
+                robust_benchmark_curve = _compute_benchmark_curve(robustness_perf, robust_spy)
+                if not robust_benchmark_curve.empty:
+                    robustness_benchmark_return = float(robust_benchmark_curve["benchmark_equity"].iloc[-1] - 1.0)
+                    robustness_excess_return = float(robustness_total_return - robustness_benchmark_return)
             robustness_rows.append(
                 {
                     "periods": periods,
@@ -234,12 +245,22 @@ def main() -> None:
                     "backtest_days": int(len(robustness_perf)),
                     "total_return": float(robustness_total_return),
                     "annualized_sharpe": float(robustness_results["sharpe"]),
+                    "benchmark_return": float(robustness_benchmark_return),
+                    "excess_return": float(robustness_excess_return),
                 }
             )
 
         robustness_summary = pd.DataFrame(
             robustness_rows,
-            columns=["periods", "rows_in_dataset", "backtest_days", "total_return", "annualized_sharpe"],
+            columns=[
+                "periods",
+                "rows_in_dataset",
+                "backtest_days",
+                "total_return",
+                "annualized_sharpe",
+                "benchmark_return",
+                "excess_return",
+            ],
         ).sort_values("periods")
         robustness_summary.to_csv(results_dir / "robustness_summary.csv", index=False)
 
