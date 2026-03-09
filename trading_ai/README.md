@@ -35,9 +35,21 @@ Output is written to `results/daily_signals.csv` with:
 - `date`
 - `ticker`
 - `score`
+- `current_weight`
 - `decile`
+- `model_target_weight` (raw model portfolio for this date)
 - `target_weight`
+- `delta_weight`
+- `current_value` (if `--portfolio-value` is provided)
+- `target_value` (if `--portfolio-value` is provided)
+- `delta_value` (if `--portfolio-value` is provided)
+- `signal_type` (`rebalance` or `hold`)
+- `rebalance_due`
+- `next_rebalance_date`
+- `valid_until`
 - `action`
+
+Default behavior is now `--rebalance-frequency weekly` for practical weekly execution while still generating output daily.
 
 Optional current portfolio input:
 - Path: `results/current_portfolio.csv`
@@ -53,6 +65,25 @@ AMZN,0.00
 ```
 
 If `results/current_portfolio.csv` is missing, the script still runs and emits BUY/HOLD placeholder actions.
+In that case, `current_weight`, `delta_weight`, `current_value`, and `delta_value` are left blank while `target_weight` remains populated.
+
+To include dollar values in output, pass `--portfolio-value`:
+
+```bash
+python scripts/run_daily_signal.py --portfolio-value 100000
+```
+
+Rebalance scheduling:
+- `daily`: executable `target_weight` is refreshed every run.
+- `weekly`: executable `target_weight` updates on the first available trading day of each calendar week.
+- `biweekly`: same weekly anchor, but every second rebalance week.
+- Between scheduled rebalances, the script keeps current holdings as executable targets when `current_portfolio.csv` is present, while still showing `model_target_weight` for preview.
+
+How to populate `current_portfolio.csv`:
+1. List each currently held ticker once.
+2. Set `current_weight` as a decimal portfolio fraction (for example `0.1250` = 12.50%).
+3. Ensure weights reflect your live book and approximately sum to `1.0` (or less if holding cash).
+4. Use uppercase ticker symbols.
 
 Validation checklist:
 1. Run `python scripts/run_daily_signal.py`.

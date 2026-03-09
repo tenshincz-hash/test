@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from execution.signal_schedule import is_rebalance_day, next_rebalance_date
 from feature_engineering.features import FeatureEngineer
 from feature_engineering.labels import LabelGenerator
 from models.baseline import BaselineClassifier
@@ -57,9 +58,15 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path",
     )
     parser.add_argument(
+        "--portfolio-value",
+        type=float,
+        default=None,
+        help="Optional total portfolio value (e.g., 100000) to emit current/target/delta values.",
+    )
+    parser.add_argument(
         "--rebalance-frequency",
         choices=["daily", "weekly", "biweekly"],
-        default="daily",
+        default="weekly",
         help="Rebalance schedule for transitioning from current to target weights",
     )
     return parser.parse_args()
@@ -99,26 +106,6 @@ def _derive_action(target_weight: float, current_weight: float, has_current_file
     if target_weight <= tol and current_weight <= tol:
         return "HOLD"
     return "SELL"
-
-
-def _rebalance_step(frequency: str) -> int:
-    if frequency == "daily":
-        return 1
-    if frequency == "weekly":
-        return 5
-    if frequency == "biweekly":
-        return 10
-    raise ValueError(f"Unsupported rebalance_frequency='{frequency}'")
-
-
-def _is_rebalance_day(dates: pd.Series, frequency: str) -> bool:
-    step = _rebalance_step(frequency)
-    if step == 1:
-        return True
-    unique_dates = pd.Index(pd.to_datetime(dates).dropna().sort_values().unique())
-    if unique_dates.empty:
-        return True
-    return (len(unique_dates) - 1) % step == 0
 
 
 def main() -> None:
@@ -165,49 +152,118 @@ def main() -> None:
     ranked = today_scores.sort_values("score", ascending=False).reset_index(drop=True)
     ranked["decile"] = np.ceil(ranked["score"].rank(method="first", pct=True) * 10).astype(int).clip(1, 10)
 
-    daily_targets = PortfolioConstructor(top_n=10).build_weights(ranked)[
+    model_targets = PortfolioConstructor(top_n=10).build_weights(ranked)[
         ["date", "ticker", "score", "decile", "weight"]
-    ].rename(columns={"weight": "target_weight"})
-    daily_targets = daily_targets[daily_targets["date"] == latest_date].copy()
+    ].rename(columns={"weight": "model_target_weight"})
+    model_targets = model_targets[model_targets["date"] == latest_date].copy()
 
     current = _load_current_portfolio(args.current_portfolio)
     has_current_file = args.current_portfolio.exists()
-    rebalance_due = _is_rebalance_day(modeled["date"], args.rebalance_frequency)
+    rebalance_due = is_rebalance_day(modeled["date"], args.rebalance_frequency)
+    next_rebalance_date_value = next_rebalance_date(latest_date, args.rebalance_frequency)
 
-    if not rebalance_due:
-        if has_current_file:
-            # Hold current weights between scheduled rebalances.
-            daily_targets = current.copy().assign(
-                date=latest_date,
-                score=np.nan,
-                decile=pd.NA,
-            )[["date", "ticker", "score", "decile", "current_weight"]].rename(
-                columns={"current_weight": "target_weight"}
-            )
-        else:
-            daily_targets["target_weight"] = 0.0
+    if rebalance_due:
+        execution_targets = (
+            model_targets[["date", "ticker", "model_target_weight"]]
+            .rename(columns={"model_target_weight": "target_weight"})
+            .copy()
+        )
+    elif has_current_file:
+        # Hold current weights between scheduled rebalances.
+        execution_targets = current.copy().assign(
+            date=latest_date,
+            target_weight=lambda df: df["current_weight"],
+        )[["date", "ticker", "target_weight"]]
+    else:
+        # If current holdings are unknown, emit model targets as executable placeholders.
+        execution_targets = (
+            model_targets[["date", "ticker", "model_target_weight"]]
+            .rename(columns={"model_target_weight": "target_weight"})
+            .copy()
+        )
 
-    merged = daily_targets.merge(current, on="ticker", how="outer")
+    merged = execution_targets.merge(current, on="ticker", how="outer")
+    merged = merged.merge(
+        model_targets[["ticker", "score", "decile", "model_target_weight"]],
+        on="ticker",
+        how="outer",
+    )
     merged["date"] = merged["date"].fillna(latest_date)
     merged["score"] = merged["score"].astype(float)
     merged["decile"] = merged["decile"].astype("Int64")
     merged["target_weight"] = merged["target_weight"].fillna(0.0)
-    merged["current_weight"] = merged["current_weight"].fillna(0.0)
-    merged["turnover"] = (merged["target_weight"] - merged["current_weight"]).abs()
+    merged["model_target_weight"] = merged["model_target_weight"].fillna(0.0)
+    merged["current_weight"] = pd.to_numeric(merged["current_weight"], errors="coerce")
+    current_weight_for_calc = merged["current_weight"].fillna(0.0)
+    merged["delta_weight"] = merged["target_weight"] - current_weight_for_calc
+    merged["turnover"] = merged["delta_weight"].abs()
     merged["estimated_cost"] = merged["turnover"] * TRANSACTION_COST_RATE
     merged["action"] = merged.apply(
         lambda row: _derive_action(
             target_weight=float(row["target_weight"]),
-            current_weight=float(row["current_weight"]),
+            current_weight=float(0.0 if pd.isna(row["current_weight"]) else row["current_weight"]),
             has_current_file=has_current_file,
         ),
         axis=1,
     )
+    merged["rebalance_due"] = rebalance_due
+    merged["signal_type"] = "rebalance" if rebalance_due else "hold"
+    merged["next_rebalance_date"] = next_rebalance_date_value
+    merged["valid_until"] = next_rebalance_date_value
+
+    if args.portfolio_value is not None:
+        if args.portfolio_value < 0:
+            raise ValueError("--portfolio-value must be non-negative.")
+        merged["current_value"] = merged["current_weight"] * args.portfolio_value
+        merged["target_value"] = merged["target_weight"] * args.portfolio_value
+        merged["delta_value"] = merged["target_value"] - merged["current_value"].fillna(0.0)
+    else:
+        merged["current_value"] = np.nan
+        merged["target_value"] = np.nan
+        merged["delta_value"] = np.nan
+
+    if not has_current_file:
+        merged["current_weight"] = np.nan
+        merged["delta_weight"] = np.nan
+        merged["current_value"] = np.nan
+        merged["delta_value"] = np.nan
 
     output = merged[
-        ["date", "ticker", "score", "decile", "target_weight", "turnover", "estimated_cost", "action"]
+        [
+            "date",
+            "ticker",
+            "score",
+            "decile",
+            "current_weight",
+            "model_target_weight",
+            "target_weight",
+            "delta_weight",
+            "current_value",
+            "target_value",
+            "delta_value",
+            "turnover",
+            "estimated_cost",
+            "action",
+            "signal_type",
+            "rebalance_due",
+            "next_rebalance_date",
+            "valid_until",
+        ]
     ].copy()
     output["date"] = pd.to_datetime(output["date"]).dt.normalize()
+    output["next_rebalance_date"] = pd.to_datetime(output["next_rebalance_date"]).dt.normalize()
+    output["valid_until"] = pd.to_datetime(output["valid_until"]).dt.normalize()
+    # Round for practical manual execution readability.
+    output["score"] = output["score"].round(4)
+    output["current_weight"] = output["current_weight"].round(4)
+    output["model_target_weight"] = output["model_target_weight"].round(4)
+    output["target_weight"] = output["target_weight"].round(4)
+    output["delta_weight"] = output["delta_weight"].round(4)
+    output["turnover"] = output["turnover"].round(4)
+    output["estimated_cost"] = output["estimated_cost"].round(6)
+    output["current_value"] = output["current_value"].round(2)
+    output["target_value"] = output["target_value"].round(2)
+    output["delta_value"] = output["delta_value"].round(2)
     output = output.sort_values(["target_weight", "score"], ascending=[False, False], na_position="last")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -217,8 +273,10 @@ def main() -> None:
     print(f"Date: {latest_date.date()}")
     print(f"Rebalance frequency: {args.rebalance_frequency}")
     print(f"Rebalance due today: {'yes' if rebalance_due else 'no'}")
+    print(f"Next rebalance date: {next_rebalance_date_value.date()}")
     print(f"Universe size scored: {len(today_scores)}")
-    print(f"Target holdings (decile 8-9): {(output['target_weight'] > 0).sum()}")
+    print(f"Model target holdings (decile 8-9): {(output['model_target_weight'] > 0).sum()}")
+    print(f"Executable target holdings today: {(output['target_weight'] > 0).sum()}")
     print(f"Estimated one-way transition cost: {output['estimated_cost'].sum():.4%}")
     print(f"Output: {args.output}")
     if has_current_file:

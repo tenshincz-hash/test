@@ -1,0 +1,6 @@
+date,ticker,score,decile,current_weight,model_target_weight,target_weight,delta_weight,current_value,target_value,delta_value,turnover,estimated_cost,action,signal_type,rebalance_due,next_rebalance_date,valid_until
+2026-03-02,MSFT,0.8771,8,0.25,1.0,1.0,0.75,25000.0,100000.0,75000.0,0.75,0.000375,BUY,rebalance,True,2026-03-09,2026-03-09
+2026-03-02,AMZN,0.9759,10,0.1,0.0,0.0,-0.1,10000.0,0.0,-10000.0,0.1,5e-05,EXIT,rebalance,True,2026-03-09,2026-03-09
+2026-03-02,NVDA,0.5441,6,0.2,0.0,0.0,-0.2,20000.0,0.0,-20000.0,0.2,0.0001,EXIT,rebalance,True,2026-03-09,2026-03-09
+2026-03-02,GOOGL,0.2383,4,0.15,0.0,0.0,-0.15,15000.0,0.0,-15000.0,0.15,7.5e-05,EXIT,rebalance,True,2026-03-09,2026-03-09
+2026-03-02,AAPL,0.0408,2,0.3,0.0,0.0,-0.3,30000.0,0.0,-30000.0,0.3,0.00015,EXIT,rebalance,True,2026-03-09,2026-03-09
