@@ -10,15 +10,10 @@ from execution.simulator import ExecutionSimulator
 from orchestration.pipeline import ResearchConfig, TradingResearchPipeline
 from portfolio.construction import PortfolioConstructor
 from risk.manager import RiskManager
+from universe_loader import load_tickers_from_csv
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"]
-SP500_50_TICKERS = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK-B", "LLY", "AVGO", "TSLA",
-    "JPM", "WMT", "XOM", "UNH", "V", "MA", "ORCL", "COST", "PG", "JNJ",
-    "HD", "BAC", "ABBV", "KO", "CRM", "NFLX", "CVX", "MRK", "CSCO", "WFC",
-    "ACN", "IBM", "LIN", "MCD", "ABT", "PM", "GE", "AMD", "INTU", "DIS",
-    "TXN", "T", "VZ", "CAT", "PFE", "AMGN", "QCOM", "NOW", "SPGI", "INTC",
-]
+DEFAULT_UNIVERSE_FILE = Path("configs/universe_500.csv")
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--top-n", type=int, default=10, help="Number of tickers per side")
     parser.add_argument("--tickers", nargs="+", default=None, help="Optional custom tickers")
+    parser.add_argument(
+        "--universe-file",
+        type=Path,
+        default=DEFAULT_UNIVERSE_FILE,
+        help="CSV file containing ticker universe for Yahoo mode (columns: ticker or symbol)",
+    )
     return parser.parse_args()
 
 
@@ -65,7 +66,7 @@ def main() -> None:
     args = parse_args()
     tickers = args.tickers
     if tickers is None:
-        tickers = SP500_50_TICKERS if args.data_provider == "yahoo" else DEFAULT_TICKERS
+        tickers = load_tickers_from_csv(args.universe_file) if args.data_provider == "yahoo" else DEFAULT_TICKERS
 
     config = ResearchConfig(
         tickers=tickers,

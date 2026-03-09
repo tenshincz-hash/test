@@ -1,0 +1,24 @@
+[
+  {
+    "periods":500,
+    "total_return":0.0021978414,
+    "annualized_sharpe":0.1729939293,
+    "max_drawdown":-0.1075877159,
+    "benchmark_return":-0.0042579483,
+    "excess_return":0.0064557898,
+    "requested_tickers_count":500,
+    "downloaded_tickers_count":500,
+    "scored_tickers_count":499
+  },
+  {
+    "periods":1200,
+    "total_return":1.179464286,
+    "annualized_sharpe":1.1556157902,
+    "max_drawdown":-0.2740181114,
+    "benchmark_return":0.7801130786,
+    "excess_return":0.3993512073,
+    "requested_tickers_count":500,
+    "downloaded_tickers_count":499,
+    "scored_tickers_count":498
+  }
+]

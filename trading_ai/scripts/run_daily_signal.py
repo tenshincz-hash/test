@@ -14,14 +14,10 @@ from nlp_engine.sentiment import SentimentPipeline
 from orchestration.pipeline import TradingResearchPipeline
 from portfolio.construction import PortfolioConstructor
 from ingestion.yahoo_data import YahooFinanceDataProvider
+from risk.manager import RiskManager
+from universe_loader import load_tickers_from_csv
 
-SP500_50_TICKERS = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK-B", "LLY", "AVGO", "TSLA",
-    "JPM", "WMT", "XOM", "UNH", "V", "MA", "ORCL", "COST", "PG", "JNJ",
-    "HD", "BAC", "ABBV", "KO", "CRM", "NFLX", "CVX", "MRK", "CSCO", "WFC",
-    "ACN", "IBM", "LIN", "MCD", "ABT", "PM", "GE", "AMD", "INTU", "DIS",
-    "TXN", "T", "VZ", "CAT", "PFE", "AMGN", "QCOM", "NOW", "SPGI", "INTC",
-]
+DEFAULT_UNIVERSE_FILE = Path("configs/universe_500.csv")
 TRANSACTION_COST_RATE = 0.0005
 
 
@@ -30,8 +26,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tickers",
         nargs="+",
-        default=SP500_50_TICKERS,
-        help="Ticker universe to rank (default: S&P 500 sample used by run_research)",
+        default=None,
+        help="Ticker universe to rank (overrides --universe-file)",
+    )
+    parser.add_argument(
+        "--universe-file",
+        type=Path,
+        default=DEFAULT_UNIVERSE_FILE,
+        help="CSV file containing ticker universe (columns: ticker or symbol)",
     )
     parser.add_argument(
         "--periods",
@@ -110,24 +112,15 @@ def _derive_action(target_weight: float, current_weight: float, has_current_file
 
 def main() -> None:
     args = parse_args()
+    tickers = args.tickers if args.tickers is not None else load_tickers_from_csv(args.universe_file)
 
-    # Ensure yfinance cache writes to a project-local path that is writable.
-    try:
-        import yfinance as yf
+    data_provider = YahooFinanceDataProvider(seed=args.seed)
 
-        cache_dir = Path("results/.yfinance_cache")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        yf.cache.set_cache_location(str(cache_dir.resolve()))
-        yf.set_tz_cache_location(str(cache_dir.resolve()))
-    except Exception:
-        # Cache config is best-effort; download can still work with defaults.
-        pass
-
-    prices = YahooFinanceDataProvider(seed=args.seed).generate_prices(
-        tickers=args.tickers,
+    prices = data_provider.generate_prices(
+        tickers=tickers,
         periods=args.periods,
     )
-    news = YahooFinanceDataProvider(seed=args.seed).generate_news(prices)
+    news = data_provider.generate_news(prices)
     sentiment = SentimentPipeline().transform(news)
     features = FeatureEngineer().transform(prices, sentiment)
     labeled = LabelGenerator(horizon=5).transform(features)
@@ -138,6 +131,17 @@ def main() -> None:
         raise ValueError("No valid rows after feature/label preparation. Increase --periods or review Yahoo data.")
 
     latest_date = modeled["date"].max()
+    spy_prices = data_provider.generate_prices(["SPY"], periods=args.periods + 250)
+    regime = RiskManager.build_market_regime(spy_prices)
+    regime_today = regime[regime["date"] == latest_date]
+    if regime_today.empty:
+        raise ValueError(
+            f"No SPY regime state available for latest model date {latest_date.date()}. Increase --periods."
+        )
+    regime_favorable = bool(regime_today["regime_favorable"].iloc[0])
+    spy_close = float(regime_today["spy_close"].iloc[0])
+    spy_sma_200 = float(regime_today["spy_sma_200"].iloc[0]) if pd.notna(regime_today["spy_sma_200"].iloc[0]) else np.nan
+
     train = modeled[modeled["date"] < latest_date]
     today = modeled[modeled["date"] == latest_date]
     if train.empty or today.empty:
@@ -156,6 +160,8 @@ def main() -> None:
         ["date", "ticker", "score", "decile", "weight"]
     ].rename(columns={"weight": "model_target_weight"})
     model_targets = model_targets[model_targets["date"] == latest_date].copy()
+    if not regime_favorable:
+        model_targets["model_target_weight"] = 0.0
 
     current = _load_current_portfolio(args.current_portfolio)
     has_current_file = args.current_portfolio.exists()
@@ -182,6 +188,9 @@ def main() -> None:
             .copy()
         )
 
+    if not regime_favorable:
+        execution_targets["target_weight"] = 0.0
+
     merged = execution_targets.merge(current, on="ticker", how="outer")
     merged = merged.merge(
         model_targets[["ticker", "score", "decile", "model_target_weight"]],
@@ -207,9 +216,12 @@ def main() -> None:
         axis=1,
     )
     merged["rebalance_due"] = rebalance_due
-    merged["signal_type"] = "rebalance" if rebalance_due else "hold"
+    merged["signal_type"] = "risk_off" if not regime_favorable else ("rebalance" if rebalance_due else "hold")
     merged["next_rebalance_date"] = next_rebalance_date_value
     merged["valid_until"] = next_rebalance_date_value
+    merged["regime_favorable"] = regime_favorable
+    merged["spy_close"] = spy_close
+    merged["spy_sma_200"] = spy_sma_200
 
     if args.portfolio_value is not None:
         if args.portfolio_value < 0:
@@ -248,6 +260,9 @@ def main() -> None:
             "rebalance_due",
             "next_rebalance_date",
             "valid_until",
+            "regime_favorable",
+            "spy_close",
+            "spy_sma_200",
         ]
     ].copy()
     output["date"] = pd.to_datetime(output["date"]).dt.normalize()
@@ -264,6 +279,8 @@ def main() -> None:
     output["current_value"] = output["current_value"].round(2)
     output["target_value"] = output["target_value"].round(2)
     output["delta_value"] = output["delta_value"].round(2)
+    output["spy_close"] = output["spy_close"].round(4)
+    output["spy_sma_200"] = output["spy_sma_200"].round(4)
     output = output.sort_values(["target_weight", "score"], ascending=[False, False], na_position="last")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -273,6 +290,11 @@ def main() -> None:
     print(f"Date: {latest_date.date()}")
     print(f"Rebalance frequency: {args.rebalance_frequency}")
     print(f"Rebalance due today: {'yes' if rebalance_due else 'no'}")
+    print(
+        "Market regime (SPY close > 200D SMA): "
+        f"{'favorable' if regime_favorable else 'unfavorable'} "
+        f"(close={spy_close:.2f}, sma200={spy_sma_200:.2f})"
+    )
     print(f"Next rebalance date: {next_rebalance_date_value.date()}")
     print(f"Universe size scored: {len(today_scores)}")
     print(f"Model target holdings (decile 8-9): {(output['model_target_weight'] > 0).sum()}")

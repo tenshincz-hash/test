@@ -4,7 +4,12 @@ import pandas as pd
 
 
 class FeatureEngineer:
-    def transform(self, prices: pd.DataFrame, sentiments: pd.DataFrame) -> pd.DataFrame:
+    def transform(
+        self,
+        prices: pd.DataFrame,
+        sentiments: pd.DataFrame,
+        benchmark_prices: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
         px = prices.copy().sort_values(["ticker", "date"])
 
         if "open" not in px.columns:
@@ -76,6 +81,49 @@ class FeatureEngineer:
 
         px["high_low_range_pct"] = (px["high"] - px["low"]) / close_nonzero
         px["close_open_gap_pct"] = (px["close"] - px["open"]) / px["open"].replace(0, pd.NA)
+
+        # Common cross-sectional factors (using trading-day approximations).
+        px["mom_1m"] = close_by_ticker.pct_change(20)
+        px["mom_3m"] = close_by_ticker.pct_change(60)
+        px["mom_6m"] = close_by_ticker.pct_change(120)
+        px["mom_12m"] = close_by_ticker.pct_change(240)
+
+        px["realized_vol_20d"] = (
+            px.groupby("ticker")["ret_1d"]
+            .rolling(window=20, min_periods=20)
+            .std()
+            .reset_index(level=0, drop=True)
+            * (252**0.5)
+        )
+        px["realized_vol_60d"] = (
+            px.groupby("ticker")["ret_1d"]
+            .rolling(window=60, min_periods=60)
+            .std()
+            .reset_index(level=0, drop=True)
+            * (252**0.5)
+        )
+
+        if benchmark_prices is not None and not benchmark_prices.empty:
+            benchmark = benchmark_prices.copy()
+            benchmark["date"] = pd.to_datetime(benchmark["date"])
+            benchmark = benchmark.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+            benchmark["spy_close"] = pd.to_numeric(benchmark["close"], errors="coerce")
+            benchmark["spy_ret_3m"] = benchmark["spy_close"].pct_change(60)
+            benchmark["spy_ret_6m"] = benchmark["spy_close"].pct_change(120)
+            benchmark["spy_ret_12m"] = benchmark["spy_close"].pct_change(240)
+            px = px.merge(
+                benchmark[["date", "spy_ret_3m", "spy_ret_6m", "spy_ret_12m"]],
+                on="date",
+                how="left",
+            )
+            px["rel_strength_3m"] = px["mom_3m"] - px["spy_ret_3m"]
+            px["rel_strength_6m"] = px["mom_6m"] - px["spy_ret_6m"]
+            px["rel_strength_12m"] = px["mom_12m"] - px["spy_ret_12m"]
+            px = px.drop(columns=["spy_ret_3m", "spy_ret_6m", "spy_ret_12m"])
+        else:
+            px["rel_strength_3m"] = 0.0
+            px["rel_strength_6m"] = 0.0
+            px["rel_strength_12m"] = 0.0
 
         merged = px.merge(sentiments, on=["date", "ticker"], how="left")
         merged["sentiment"] = merged["sentiment"].fillna(0.0)

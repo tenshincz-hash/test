@@ -1,0 +1,13 @@
+{
+  "periods": 1200,
+  "use_volatility_targeting": true,
+  "requested_tickers_count": 500,
+  "downloaded_tickers_count": 500,
+  "scored_tickers_count": 499,
+  "backtest_days": 761,
+  "total_return": 0.9660462109684176,
+  "annualized_sharpe": 1.0770422719388582,
+  "max_drawdown": -0.2388108123079138,
+  "benchmark_return": 0.7801133637740476,
+  "excess_return": 0.18593284719436998
+}

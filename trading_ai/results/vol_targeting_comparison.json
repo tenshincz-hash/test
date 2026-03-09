@@ -1,0 +1,28 @@
+[
+  {
+    "periods":1200,
+    "use_volatility_targeting":true,
+    "requested_tickers_count":500,
+    "downloaded_tickers_count":500,
+    "scored_tickers_count":499,
+    "backtest_days":761,
+    "total_return":0.966046211,
+    "annualized_sharpe":1.0770422719,
+    "max_drawdown":-0.2388108123,
+    "benchmark_return":0.7801133638,
+    "excess_return":0.1859328472
+  },
+  {
+    "periods":1200,
+    "use_volatility_targeting":false,
+    "requested_tickers_count":500,
+    "downloaded_tickers_count":500,
+    "scored_tickers_count":499,
+    "backtest_days":761,
+    "total_return":1.1358856929,
+    "annualized_sharpe":1.1268597869,
+    "max_drawdown":-0.254436149,
+    "benchmark_return":0.7801130786,
+    "excess_return":0.3557726143
+  }
+]

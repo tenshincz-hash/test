@@ -23,6 +23,8 @@ python -m pip install -e .[dev]
 python scripts/run_research.py
 ```
 
+For Yahoo runs, the default universe is loaded from `configs/universe_500.csv` (about 500 large/mid-cap US tickers with sector metadata).
+
 ## Daily Signal Bot (Yahoo, Long-Only Decile 8-9)
 
 Generate today's target portfolio weights from the existing Yahoo strategy:
@@ -30,6 +32,13 @@ Generate today's target portfolio weights from the existing Yahoo strategy:
 ```bash
 python scripts/run_daily_signal.py
 ```
+
+By default, this also reads tickers from `configs/universe_500.csv` (override with `--tickers ...` or `--universe-file ...`).
+
+## Research Run (Sector-Neutral Cap)
+
+`scripts/run_research.py` supports sector-neutral portfolio construction via `--max-sector-weight` (default `0.20`).
+When sector data is available in the universe file, long-book sector exposure is capped per rebalance date.
 
 Output is written to `results/daily_signals.csv` with:
 - `date`

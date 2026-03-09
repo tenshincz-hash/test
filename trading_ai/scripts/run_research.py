@@ -10,16 +10,11 @@ import pandas as pd
 
 from models.baseline import BaselineClassifier
 from orchestration.pipeline import ResearchConfig, TradingResearchPipeline
+from universe_loader import load_universe_metadata
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"]
-SP500_50_TICKERS = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK-B", "LLY", "AVGO", "TSLA",
-    "JPM", "WMT", "XOM", "UNH", "V", "MA", "ORCL", "COST", "PG", "JNJ",
-    "HD", "BAC", "ABBV", "KO", "CRM", "NFLX", "CVX", "MRK", "CSCO", "WFC",
-    "ACN", "IBM", "LIN", "MCD", "ABT", "PM", "GE", "AMD", "INTU", "DIS",
-    "TXN", "T", "VZ", "CAT", "PFE", "AMGN", "QCOM", "NOW", "SPGI", "INTC",
-]
-ROBUSTNESS_PERIODS = [500, 800, 1200, 1600, 2000]
+DEFAULT_UNIVERSE_FILE = Path("configs/universe_500.csv")
+ROBUSTNESS_PERIODS = [500, 1200]
 
 
 def _download_spy_prices(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
@@ -70,6 +65,49 @@ def _compute_benchmark_curve(perf: pd.DataFrame, spy_prices: pd.DataFrame) -> pd
     out["benchmark_equity"] = benchmark_equity
     return out.reset_index()
 
+
+def _max_drawdown(equity_curve: pd.Series) -> float:
+    if equity_curve.empty:
+        return 0.0
+    running_peak = equity_curve.cummax()
+    drawdown = equity_curve / running_peak - 1.0
+    return float(drawdown.min())
+
+
+def _build_sector_exposure(portfolio: pd.DataFrame, sector_map: pd.DataFrame) -> pd.DataFrame:
+    if portfolio.empty or sector_map.empty:
+        return pd.DataFrame(columns=["date", "sector", "sector_weight", "sector_share"])
+
+    merged = portfolio.merge(sector_map, on="ticker", how="left")
+    merged["sector"] = merged["sector"].fillna("UNKNOWN")
+    merged["long_weight"] = merged["weight"].clip(lower=0.0)
+    grouped = (
+        merged.groupby(["date", "sector"], as_index=False)["long_weight"]
+        .sum()
+        .rename(columns={"long_weight": "sector_weight"})
+    )
+    total = grouped.groupby("date")["sector_weight"].transform("sum")
+    grouped["sector_share"] = np.where(total > 0, grouped["sector_weight"] / total, 0.0)
+    return grouped.sort_values(["date", "sector"]).reset_index(drop=True)
+
+
+def _sector_concentration_metrics(exposure: pd.DataFrame) -> dict[str, float]:
+    if exposure.empty:
+        return {
+            "avg_max_sector_share": 0.0,
+            "max_sector_share_observed": 0.0,
+            "avg_sector_hhi": 0.0,
+        }
+
+    max_share = exposure.groupby("date")["sector_share"].max()
+    hhi = exposure.groupby("date")["sector_share"].apply(lambda s: float((s**2).sum()))
+    return {
+        "avg_max_sector_share": float(max_share.mean()),
+        "max_sector_share_observed": float(max_share.max()),
+        "avg_sector_hhi": float(hhi.mean()),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run end-to-end trading AI research pipeline")
     parser.add_argument(
@@ -83,6 +121,23 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="List of ticker symbols",
+    )
+    parser.add_argument(
+        "--universe-file",
+        type=Path,
+        default=DEFAULT_UNIVERSE_FILE,
+        help="CSV file containing ticker universe for Yahoo mode (columns: ticker or symbol)",
+    )
+    parser.add_argument(
+        "--max-sector-weight",
+        type=float,
+        default=0.20,
+        help="Maximum sector exposure on long book (0-1, default 0.20)",
+    )
+    parser.add_argument(
+        "--disable-volatility-targeting",
+        action="store_true",
+        help="Disable inverse-volatility weighting and use equal weights for selected stocks",
     )
     parser.add_argument("--periods", type=int, default=520, help="Number of business-day observations")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for mock data")
@@ -98,10 +153,28 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.max_sector_weight <= 0:
+        raise ValueError("--max-sector-weight must be positive.")
+
+    universe_metadata = pd.DataFrame(columns=["ticker", "sector"])
+    sector_by_ticker: dict[str, str] | None = None
     if args.tickers is None:
-        tickers = SP500_50_TICKERS if args.data_provider == "yahoo" else DEFAULT_TICKERS
+        if args.data_provider == "yahoo":
+            universe_metadata = load_universe_metadata(args.universe_file)
+            tickers = universe_metadata["ticker"].tolist()
+        else:
+            tickers = DEFAULT_TICKERS
     else:
         tickers = args.tickers
+        if args.data_provider == "yahoo" and args.universe_file.exists():
+            universe_metadata = load_universe_metadata(args.universe_file)
+
+    if args.data_provider == "yahoo" and not universe_metadata.empty:
+        sector_by_ticker = {
+            row.ticker: row.sector
+            for row in universe_metadata.itertuples(index=False)
+            if pd.notna(row.sector)
+        }
 
     config = ResearchConfig(
         tickers=tickers,
@@ -110,26 +183,53 @@ def main() -> None:
         data_provider=args.data_provider,
         top_n=args.top_n,
         rebalance_frequency=args.rebalance_frequency,
+        sector_by_ticker=sector_by_ticker,
+        max_sector_weight=args.max_sector_weight,
+        use_volatility_targeting=not args.disable_volatility_targeting,
     )
     pipeline = TradingResearchPipeline(config)
     results = pipeline.run()
 
     perf = results["performance"]
+    requested_tickers_count = len(tickers)
+    downloaded_tickers_count = int(results["prices"]["ticker"].nunique()) if not results["prices"].empty else 0
+    scored_tickers_count = int(results["scores"]["ticker"].nunique()) if not results["scores"].empty else 0
     total_return = perf["equity_curve"].iloc[-1] - 1 if not perf.empty else 0.0
+    max_drawdown = _max_drawdown(perf["equity_curve"]) if not perf.empty else 0.0
     cost_adjusted_return = float(total_return)
     cost_adjusted_sharpe = float(results["sharpe"])
     benchmark_return = 0.0
     excess_return = float(total_return)
+    sector_metrics = {
+        "avg_max_sector_share": 0.0,
+        "max_sector_share_observed": 0.0,
+        "avg_sector_hhi": 0.0,
+    }
     benchmark_comparison = pd.DataFrame(columns=["date", "strategy_equity", "benchmark_equity"])
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    results["scores"].to_csv(results_dir / "predictions.csv", index=False)
+    sector_map_df = (
+        universe_metadata[["ticker", "sector"]].drop_duplicates(subset=["ticker"], keep="first")
+        if not universe_metadata.empty
+        else pd.DataFrame(columns=["ticker", "sector"])
+    )
+    scores_out = results["scores"].merge(sector_map_df, on="ticker", how="left")
+    scores_out.to_csv(results_dir / "predictions.csv", index=False)
+    score_columns = ["date", "ticker", "lgbm_score", "rf_score", "linear_score", "final_score", "score"]
+    available_score_columns = [col for col in score_columns if col in scores_out.columns]
+    if available_score_columns:
+        scores_out[available_score_columns].to_csv(results_dir / "model_scores.csv", index=False)
     trade_source = results.get("constructed_portfolio", results["portfolio"])
+    if "sector" not in trade_source.columns:
+        trade_source = trade_source.merge(sector_map_df, on="ticker", how="left")
     trades = trade_source[trade_source["weight"] != 0].copy()
     trades["side"] = trades["weight"].map(lambda w: "long" if w > 0 else "short")
     trades.to_csv(results_dir / "trades.csv", index=False)
     perf.to_csv(results_dir / "equity_curve.csv", index=False)
+    sector_exposure = _build_sector_exposure(results["portfolio"], sector_map_df)
+    sector_exposure.to_csv(results_dir / "sector_exposure.csv", index=False)
+    sector_metrics = _sector_concentration_metrics(sector_exposure)
 
     # Decile analysis: rank scores per rebalance date and evaluate next-day returns by score decile.
     scores = results["scores"].copy()
@@ -200,15 +300,40 @@ def main() -> None:
         "seed": args.seed,
         "top_n": args.top_n,
         "rebalance_frequency": args.rebalance_frequency,
+        "max_sector_weight": args.max_sector_weight,
+        "use_volatility_targeting": bool(not args.disable_volatility_targeting),
+        "universe_file": str(args.universe_file),
+        "requested_tickers_count": int(requested_tickers_count),
+        "downloaded_tickers_count": int(downloaded_tickers_count),
+        "scored_tickers_count": int(scored_tickers_count),
+        "avg_max_sector_share": float(sector_metrics["avg_max_sector_share"]),
+        "max_sector_share_observed": float(sector_metrics["max_sector_share_observed"]),
+        "avg_sector_hhi": float(sector_metrics["avg_sector_hhi"]),
         "rows_in_dataset": int(len(results["dataset"])),
         "backtest_days": int(len(perf)),
         "total_return": float(total_return),
         "annualized_sharpe": float(results["sharpe"]),
         "cost_adjusted_return": float(cost_adjusted_return),
         "cost_adjusted_sharpe": float(cost_adjusted_sharpe),
+        "max_drawdown": float(max_drawdown),
         "benchmark_return": float(benchmark_return),
         "excess_return": float(excess_return),
     }
+    regime = results.get("regime")
+    if isinstance(regime, pd.DataFrame) and not regime.empty:
+        favorable = regime["regime_favorable"].fillna(False)
+        metrics.update(
+            {
+                "regime_proxy": "SPY",
+                "regime_rule": "SPY close > SPY 200-day moving average",
+                "regime_favorable_days": int(favorable.sum()),
+                "regime_unfavorable_days": int((~favorable).sum()),
+                "regime_favorable_ratio": float(favorable.mean()),
+                "regime_latest_favorable": bool(favorable.iloc[-1]),
+                "regime_latest_spy_close": float(regime["spy_close"].iloc[-1]),
+                "regime_latest_spy_sma_200": float(regime["spy_sma_200"].iloc[-1]),
+            }
+        )
     (results_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
     if args.data_provider == "yahoo":
@@ -221,6 +346,9 @@ def main() -> None:
                 data_provider=args.data_provider,
                 top_n=args.top_n,
                 rebalance_frequency="weekly",
+                sector_by_ticker=sector_by_ticker,
+                max_sector_weight=args.max_sector_weight,
+                use_volatility_targeting=not args.disable_volatility_targeting,
             )
             robustness_results = TradingResearchPipeline(robustness_config).run()
             robustness_perf = robustness_results["performance"]
@@ -238,15 +366,28 @@ def main() -> None:
                 if not robust_benchmark_curve.empty:
                     robustness_benchmark_return = float(robust_benchmark_curve["benchmark_equity"].iloc[-1] - 1.0)
                     robustness_excess_return = float(robustness_total_return - robustness_benchmark_return)
+            robustness_sector_exposure = _build_sector_exposure(robustness_results["portfolio"], sector_map_df)
+            robustness_sector_metrics = _sector_concentration_metrics(robustness_sector_exposure)
             robustness_rows.append(
                 {
                     "periods": periods,
+                    "requested_tickers_count": int(len(tickers)),
+                    "downloaded_tickers_count": int(
+                        robustness_results["prices"]["ticker"].nunique()
+                    ) if not robustness_results["prices"].empty else 0,
+                    "scored_tickers_count": int(
+                        robustness_results["scores"]["ticker"].nunique()
+                    ) if not robustness_results["scores"].empty else 0,
                     "rows_in_dataset": int(len(robustness_results["dataset"])),
                     "backtest_days": int(len(robustness_perf)),
                     "total_return": float(robustness_total_return),
                     "annualized_sharpe": float(robustness_results["sharpe"]),
+                    "max_drawdown": float(_max_drawdown(robustness_perf["equity_curve"]) if not robustness_perf.empty else 0.0),
                     "benchmark_return": float(robustness_benchmark_return),
                     "excess_return": float(robustness_excess_return),
+                    "avg_max_sector_share": float(robustness_sector_metrics["avg_max_sector_share"]),
+                    "max_sector_share_observed": float(robustness_sector_metrics["max_sector_share_observed"]),
+                    "avg_sector_hhi": float(robustness_sector_metrics["avg_sector_hhi"]),
                 }
             )
 
@@ -254,12 +395,19 @@ def main() -> None:
             robustness_rows,
             columns=[
                 "periods",
+                "requested_tickers_count",
+                "downloaded_tickers_count",
+                "scored_tickers_count",
                 "rows_in_dataset",
                 "backtest_days",
                 "total_return",
                 "annualized_sharpe",
+                "max_drawdown",
                 "benchmark_return",
                 "excess_return",
+                "avg_max_sector_share",
+                "max_sector_share_observed",
+                "avg_sector_hhi",
             ],
         ).sort_values("periods")
         robustness_summary.to_csv(results_dir / "robustness_summary.csv", index=False)
@@ -329,12 +477,25 @@ def main() -> None:
 
     print("=== Trading AI Research Run ===")
     print(f"Data provider: {args.data_provider}")
-    print(f"Tickers ({len(tickers)}): {', '.join(tickers)}")
+    preview = ", ".join(tickers[:10])
+    suffix = " ..." if len(tickers) > 10 else ""
+    print(f"Tickers ({len(tickers)}): {preview}{suffix}")
+    print(
+        "Universe validation: "
+        f"requested={requested_tickers_count}, downloaded={downloaded_tickers_count}, scored={scored_tickers_count}"
+    )
     print(f"Rows in dataset: {len(results['dataset'])}")
     print(f"Backtest days: {len(perf)}")
     print(f"Rebalance frequency: {args.rebalance_frequency}")
     print(f"Total Return: {total_return:.2%}")
     print(f"Annualized Sharpe: {results['sharpe']:.2f}")
+    print(f"Max Drawdown: {max_drawdown:.2%}")
+    print(
+        "Sector concentration: "
+        f"avg max sector share={sector_metrics['avg_max_sector_share']:.2%}, "
+        f"worst max sector share={sector_metrics['max_sector_share_observed']:.2%}, "
+        f"avg HHI={sector_metrics['avg_sector_hhi']:.4f}"
+    )
     if args.data_provider == "yahoo":
         print(f"SPY Benchmark Return: {benchmark_return:.2%}")
         print(f"Excess Return vs SPY: {excess_return:.2%}")

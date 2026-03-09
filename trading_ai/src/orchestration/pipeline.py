@@ -25,6 +25,9 @@ class ResearchConfig:
     data_provider: str = "mock"
     top_n: int = 10
     rebalance_frequency: str = "daily"
+    sector_by_ticker: dict[str, str] | None = None
+    max_sector_weight: float = 1.0
+    use_volatility_targeting: bool = True
 
 
 class TradingResearchPipeline:
@@ -49,6 +52,15 @@ class TradingResearchPipeline:
         "volume_change_5d",
         "high_low_range_pct",
         "close_open_gap_pct",
+        "mom_1m",
+        "mom_3m",
+        "mom_6m",
+        "mom_12m",
+        "realized_vol_20d",
+        "realized_vol_60d",
+        "rel_strength_3m",
+        "rel_strength_6m",
+        "rel_strength_12m",
         "sentiment",
         "sentiment_5d",
     ]
@@ -63,6 +75,8 @@ class TradingResearchPipeline:
         self.store = InMemoryDataStore()
 
     def run(self) -> dict[str, pd.DataFrame | float]:
+        regime = pd.DataFrame(columns=["date", "spy_close", "spy_sma_200", "regime_favorable"])
+        spy_prices = pd.DataFrame(columns=["date", "ticker", "open", "high", "low", "close", "volume"])
         if self.config.data_provider == "mock":
             ingestor = MockMarketDataIngestor(seed=self.config.seed)
         elif self.config.data_provider == "yahoo":
@@ -71,10 +85,16 @@ class TradingResearchPipeline:
             raise ValueError(f"Unsupported data_provider='{self.config.data_provider}'")
 
         prices = ingestor.generate_prices(self.config.tickers, periods=self.config.periods)
+        if self.config.data_provider == "yahoo":
+            spy_prices = ingestor.generate_prices(["SPY"], periods=self.config.periods + 250)
         news = ingestor.generate_news(prices)
 
         sentiment = SentimentPipeline().transform(news)
-        features = FeatureEngineer().transform(prices, sentiment)
+        features = FeatureEngineer().transform(
+            prices,
+            sentiment,
+            benchmark_prices=spy_prices if self.config.data_provider == "yahoo" else None,
+        )
         labeled = LabelGenerator(horizon=5).transform(features)
 
         self.store.write("prices", prices)
@@ -84,13 +104,24 @@ class TradingResearchPipeline:
         backtester = WalkForwardBacktester(features=self.FEATURE_COLUMNS)
         scores = backtester.run(labeled)
 
-        portfolio = PortfolioConstructor(top_n=max(1, self.config.top_n)).build_weights(scores)
+        portfolio = PortfolioConstructor(
+            top_n=max(1, self.config.top_n),
+            max_sector_weight=self.config.max_sector_weight,
+            use_volatility_targeting=self.config.use_volatility_targeting,
+        ).build_weights(
+            scores,
+            sector_by_ticker=self.config.sector_by_ticker,
+            volatility_snapshot=labeled[["date", "ticker", "realized_vol_60d"]].drop_duplicates(),
+        )
         vol_snapshot = labeled[["date", "ticker", "vol_20d"]].drop_duplicates()
         risk_adjusted = RiskManager().apply(portfolio[["date", "ticker", "weight"]], vol_snapshot)
         scheduled = self._apply_rebalance_schedule(
             risk_adjusted,
             frequency=self.config.rebalance_frequency,
         )
+        if self.config.data_provider == "yahoo":
+            regime = RiskManager.build_market_regime(spy_prices)
+        scheduled = RiskManager.apply_market_regime(scheduled, regime)
 
         execution = ExecutionSimulator()
         performance = execution.simulate(scheduled, prices)
@@ -106,6 +137,7 @@ class TradingResearchPipeline:
             "constructed_portfolio": portfolio,
             "performance": performance,
             "sharpe": sharpe,
+            "regime": regime,
         }
 
     @staticmethod

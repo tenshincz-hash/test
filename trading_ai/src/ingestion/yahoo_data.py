@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,15 @@ import pandas as pd
 @dataclass
 class YahooFinanceDataProvider:
     seed: int = 42
+
+    @staticmethod
+    def _configure_yfinance_cache() -> None:
+        import yfinance as yf
+
+        cache_dir = Path("results/.yfinance_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        yf.cache.set_cache_location(str(cache_dir.resolve()))
+        yf.set_tz_cache_location(str(cache_dir.resolve()))
 
     def generate_prices(
         self,
@@ -23,6 +33,7 @@ class YahooFinanceDataProvider:
             return pd.DataFrame(columns=["date", "ticker", "open", "high", "low", "close", "volume"])
 
         import yfinance as yf
+        self._configure_yfinance_cache()
 
         raw = yf.download(
             tickers=tickers,
@@ -101,6 +112,13 @@ class YahooFinanceDataProvider:
         if raw.empty:
             return pd.DataFrame()
         if single_ticker:
+            if isinstance(raw.columns, pd.MultiIndex):
+                level0 = raw.columns.get_level_values(0)
+                if ticker in level0:
+                    return raw[ticker].copy()
+                if "Price" in level0:
+                    return raw["Price"].copy()
+                return raw.copy()
             return raw.copy()
         if isinstance(raw.columns, pd.MultiIndex):
             if ticker not in raw.columns.get_level_values(0):
