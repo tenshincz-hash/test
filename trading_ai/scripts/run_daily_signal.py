@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         default="weekly",
         help="Rebalance schedule for transitioning from current to target weights",
     )
+    parser.add_argument(
+        "--disable-score-weighting",
+        action="store_true",
+        help="Disable score-based sizing and use equal weights for selected stocks",
+    )
     return parser.parse_args()
 
 
@@ -156,12 +161,21 @@ def main() -> None:
     ranked = today_scores.sort_values("score", ascending=False).reset_index(drop=True)
     ranked["decile"] = np.ceil(ranked["score"].rank(method="first", pct=True) * 10).astype(int).clip(1, 10)
 
-    model_targets = PortfolioConstructor(top_n=10).build_weights(ranked)[
-        ["date", "ticker", "score", "decile", "weight"]
+    model_targets = PortfolioConstructor(
+        top_n=10,
+        use_score_weighting=not args.disable_score_weighting,
+    ).build_weights(ranked)[
+        ["date", "ticker", "score", "raw_score", "score_weight", "normalized_weight", "decile", "weight"]
     ].rename(columns={"weight": "model_target_weight"})
     model_targets = model_targets[model_targets["date"] == latest_date].copy()
     if not regime_favorable:
         model_targets["model_target_weight"] = 0.0
+    else:
+        total_model_weight = float(model_targets["model_target_weight"].sum())
+        if not np.isclose(total_model_weight, 1.0, atol=1e-9):
+            raise ValueError(
+                f"Model target weights must sum to 1.0 on rebalance dates. Observed {total_model_weight:.12f}."
+            )
 
     current = _load_current_portfolio(args.current_portfolio)
     has_current_file = args.current_portfolio.exists()
@@ -193,12 +207,25 @@ def main() -> None:
 
     merged = execution_targets.merge(current, on="ticker", how="outer")
     merged = merged.merge(
-        model_targets[["ticker", "score", "decile", "model_target_weight"]],
+        model_targets[
+            [
+                "ticker",
+                "score",
+                "raw_score",
+                "score_weight",
+                "normalized_weight",
+                "decile",
+                "model_target_weight",
+            ]
+        ],
         on="ticker",
         how="outer",
     )
     merged["date"] = merged["date"].fillna(latest_date)
     merged["score"] = merged["score"].astype(float)
+    merged["raw_score"] = pd.to_numeric(merged["raw_score"], errors="coerce")
+    merged["score_weight"] = pd.to_numeric(merged["score_weight"], errors="coerce").fillna(0.0)
+    merged["normalized_weight"] = pd.to_numeric(merged["normalized_weight"], errors="coerce").fillna(0.0)
     merged["decile"] = merged["decile"].astype("Int64")
     merged["target_weight"] = merged["target_weight"].fillna(0.0)
     merged["model_target_weight"] = merged["model_target_weight"].fillna(0.0)
@@ -245,6 +272,9 @@ def main() -> None:
             "date",
             "ticker",
             "score",
+            "raw_score",
+            "score_weight",
+            "normalized_weight",
             "decile",
             "current_weight",
             "model_target_weight",
@@ -270,6 +300,9 @@ def main() -> None:
     output["valid_until"] = pd.to_datetime(output["valid_until"]).dt.normalize()
     # Round for practical manual execution readability.
     output["score"] = output["score"].round(4)
+    output["raw_score"] = output["raw_score"].round(4)
+    output["score_weight"] = output["score_weight"].round(6)
+    output["normalized_weight"] = output["normalized_weight"].round(6)
     output["current_weight"] = output["current_weight"].round(4)
     output["model_target_weight"] = output["model_target_weight"].round(4)
     output["target_weight"] = output["target_weight"].round(4)

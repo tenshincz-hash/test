@@ -1,0 +1,36 @@
+[
+  {
+    "data_provider":"yahoo",
+    "universe_file":"configs\/universe_500.csv",
+    "requested_tickers_count":500,
+    "downloaded_tickers_count":500,
+    "scored_tickers_count":499,
+    "periods":1200,
+    "rebalance_frequency":"weekly",
+    "max_sector_weight":0.2,
+    "use_volatility_targeting":false,
+    "use_score_weighting":true,
+    "total_return":1.0141771157,
+    "annualized_sharpe":1.047325783,
+    "max_drawdown":-0.2378530375,
+    "benchmark_return":0.7095752975,
+    "excess_return":0.3046018182
+  },
+  {
+    "data_provider":"yahoo",
+    "universe_file":"configs\/universe_500.csv",
+    "requested_tickers_count":500,
+    "downloaded_tickers_count":500,
+    "scored_tickers_count":499,
+    "periods":1200,
+    "rebalance_frequency":"weekly",
+    "max_sector_weight":0.2,
+    "use_volatility_targeting":false,
+    "use_score_weighting":false,
+    "total_return":1.0104413643,
+    "annualized_sharpe":1.0452831645,
+    "max_drawdown":-0.2379265772,
+    "benchmark_return":0.7095752975,
+    "excess_return":0.3008660668
+  }
+]

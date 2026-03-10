@@ -28,6 +28,8 @@ class ResearchConfig:
     sector_by_ticker: dict[str, str] | None = None
     max_sector_weight: float = 1.0
     use_volatility_targeting: bool = True
+    use_score_weighting: bool = True
+    use_long_short: bool = True
 
 
 class TradingResearchPipeline:
@@ -108,6 +110,8 @@ class TradingResearchPipeline:
             top_n=max(1, self.config.top_n),
             max_sector_weight=self.config.max_sector_weight,
             use_volatility_targeting=self.config.use_volatility_targeting,
+            use_score_weighting=self.config.use_score_weighting,
+            use_long_short=self.config.use_long_short,
         ).build_weights(
             scores,
             sector_by_ticker=self.config.sector_by_ticker,

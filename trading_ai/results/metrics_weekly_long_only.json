@@ -1,0 +1,18 @@
+{
+  "data_provider": "yahoo",
+  "universe_file": "configs/universe_500.csv",
+  "requested_tickers_count": 500,
+  "downloaded_tickers_count": 500,
+  "scored_tickers_count": 499,
+  "periods": 1200,
+  "rebalance_frequency": "weekly",
+  "max_sector_weight": 0.2,
+  "use_volatility_targeting": false,
+  "use_score_weighting": true,
+  "use_long_short": false,
+  "total_return": 0.9726613468829914,
+  "annualized_sharpe": 1.0202445341674695,
+  "max_drawdown": -0.24083175066588725,
+  "benchmark_return": 0.7132727329785986,
+  "excess_return": 0.25938861390439283
+}

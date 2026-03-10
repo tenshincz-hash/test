@@ -11,11 +11,15 @@ class PortfolioConstructor:
         gross_leverage: float = 2.0,
         max_sector_weight: float = 1.0,
         use_volatility_targeting: bool = False,
+        use_score_weighting: bool = True,
+        use_long_short: bool = True,
     ) -> None:
         self.top_n = top_n
         self.gross_leverage = gross_leverage
         self.max_sector_weight = max_sector_weight
         self.use_volatility_targeting = use_volatility_targeting
+        self.use_score_weighting = use_score_weighting
+        self.use_long_short = use_long_short
 
     def build_weights(
         self,
@@ -53,41 +57,91 @@ class PortfolioConstructor:
             else:
                 frame["volatility_60d"] = np.nan
             frame["weight"] = 0.0
+            frame["raw_score"] = frame["score"].astype(float)
+            frame["score_weight"] = 0.0
             frame["risk_weight"] = 0.0
             frame["normalized_weight"] = 0.0
             frame["decile"] = ranked["decile"]
+            frame["side"] = "flat"
 
             long_mask = frame["decile"].isin([8, 9])
+            short_mask = frame["decile"].isin([1, 2]) if self.use_long_short else pd.Series(False, index=frame.index)
             long_count = int(long_mask.sum())
-            if long_count == 0:
+            short_count = int(short_mask.sum())
+            if long_count == 0 and short_count == 0:
                 rows.append(frame)
                 continue
-            if self.use_volatility_targeting:
-                vol = pd.to_numeric(frame.loc[long_mask, "volatility_60d"], errors="coerce")
-                inv_vol = (1.0 / vol).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-                if float(inv_vol.sum()) > 0:
-                    normalized = inv_vol / float(inv_vol.sum())
-                else:
-                    inv_vol = pd.Series(np.ones(long_count), index=frame.index[long_mask], dtype=float)
-                    normalized = inv_vol / float(inv_vol.sum())
-                frame.loc[long_mask, "risk_weight"] = inv_vol.to_numpy()
-                frame.loc[long_mask, "normalized_weight"] = normalized.to_numpy()
-                frame.loc[long_mask, "weight"] = normalized.to_numpy()
-            else:
-                long_weight = 1.0 / long_count
-                frame.loc[long_mask, "risk_weight"] = 1.0
-                frame.loc[long_mask, "normalized_weight"] = long_weight
-                frame.loc[long_mask, "weight"] = long_weight
-
-            if "sector" in frame.columns and self.max_sector_weight < 1.0:
-                capped = self._apply_sector_cap(frame.loc[long_mask, ["sector", "weight"]].copy())
-                frame.loc[long_mask, "weight"] = capped["weight"].to_numpy()
-                frame.loc[long_mask, "normalized_weight"] = frame.loc[long_mask, "weight"]
+            if long_count > 0:
+                self._assign_book_weights(frame, long_mask, side="long", budget=1.0 if not self.use_long_short else self.gross_leverage / 2.0)
+            if short_count > 0:
+                self._assign_book_weights(frame, short_mask, side="short", budget=self.gross_leverage / 2.0)
             rows.append(frame)
 
         return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
-    def _apply_sector_cap(self, longs: pd.DataFrame) -> pd.DataFrame:
+    def _assign_book_weights(self, frame: pd.DataFrame, mask: pd.Series, side: str, budget: float) -> None:
+        if not bool(mask.any()) or budget <= 0:
+            return
+
+        sign = 1.0 if side == "long" else -1.0
+        selected = frame.loc[mask].copy()
+        normalized, score_weight, risk_weight = self._compute_book_weights(selected, side=side)
+
+        frame.loc[mask, "side"] = side
+        frame.loc[mask, "score_weight"] = score_weight.to_numpy()
+        frame.loc[mask, "risk_weight"] = risk_weight.to_numpy()
+        frame.loc[mask, "normalized_weight"] = sign * normalized.to_numpy()
+
+        executable = normalized.copy()
+        if "sector" in frame.columns and self.max_sector_weight < 1.0:
+            capped = self._apply_sector_cap(selected.assign(weight=normalized.to_numpy()), target_total=1.0)
+            executable = capped["weight"].astype(float)
+
+        frame.loc[mask, "weight"] = sign * executable.to_numpy() * budget
+
+    def _compute_book_weights(
+        self,
+        selected: pd.DataFrame,
+        side: str,
+    ) -> tuple[pd.Series, pd.Series, pd.Series]:
+        if selected.empty:
+            empty = pd.Series(dtype=float)
+            return empty, empty, empty
+
+        if self.use_volatility_targeting:
+            vol = pd.to_numeric(selected["volatility_60d"], errors="coerce")
+            inv_vol = (1.0 / vol).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            if float(inv_vol.sum()) > 0:
+                normalized = inv_vol / float(inv_vol.sum())
+            else:
+                inv_vol = pd.Series(np.ones(len(selected)), index=selected.index, dtype=float)
+                normalized = inv_vol / float(inv_vol.sum())
+            score_weight = pd.to_numeric(selected["raw_score"], errors="coerce").fillna(0.0).abs()
+            return normalized.astype(float), score_weight.astype(float), inv_vol.astype(float)
+
+        if self.use_score_weighting:
+            score_weight = pd.to_numeric(selected["raw_score"], errors="coerce").fillna(0.0)
+            if side == "short":
+                score_weight = score_weight.max() - score_weight
+                positive_floor = score_weight[score_weight > 0].min()
+                if pd.notna(positive_floor):
+                    score_weight = score_weight + float(positive_floor)
+            score_weight = score_weight.clip(lower=0.0)
+            score_total = float(score_weight.sum())
+            if score_total > 0:
+                normalized = score_weight / score_total
+            else:
+                score_weight = pd.Series(np.ones(len(selected)), index=selected.index, dtype=float)
+                normalized = score_weight / float(score_weight.sum())
+            risk_weight = pd.Series(np.ones(len(selected)), index=selected.index, dtype=float)
+            return normalized.astype(float), score_weight.astype(float), risk_weight
+
+        score_weight = pd.Series(np.ones(len(selected)), index=selected.index, dtype=float)
+        normalized = score_weight / float(score_weight.sum())
+        risk_weight = pd.Series(np.ones(len(selected)), index=selected.index, dtype=float)
+        return normalized.astype(float), score_weight, risk_weight
+
+    def _apply_sector_cap(self, longs: pd.DataFrame, target_total: float = 1.0) -> pd.DataFrame:
         if longs.empty:
             return longs
         if self.max_sector_weight <= 0:
@@ -99,6 +153,7 @@ class PortfolioConstructor:
         weights = out["weight"].astype(float).copy()
         sectors = out["sector"]
         cap = float(self.max_sector_weight)
+        total_target = float(target_total)
         tol = 1e-12
 
         for _ in range(max(10, 2 * sectors.nunique())):
@@ -114,7 +169,7 @@ class PortfolioConstructor:
 
             sector_weights = weights.groupby(sectors).sum()
             total_weight = float(weights.sum())
-            residual = max(0.0, 1.0 - total_weight)
+            residual = max(0.0, total_target - total_weight)
             if residual <= tol:
                 continue
 

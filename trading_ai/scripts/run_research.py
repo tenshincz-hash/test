@@ -137,7 +137,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable-volatility-targeting",
         action="store_true",
-        help="Disable inverse-volatility weighting and use equal weights for selected stocks",
+        help="Disable inverse-volatility weighting and fall back to score weighting or equal weights",
+    )
+    parser.add_argument(
+        "--disable-score-weighting",
+        action="store_true",
+        help="Disable score-based weighting and use equal weights when volatility targeting is off",
+    )
+    parser.add_argument(
+        "--disable-long-short",
+        action="store_true",
+        help="Disable long-short construction and run the legacy long-only portfolio",
     )
     parser.add_argument("--periods", type=int, default=520, help="Number of business-day observations")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for mock data")
@@ -186,6 +196,8 @@ def main() -> None:
         sector_by_ticker=sector_by_ticker,
         max_sector_weight=args.max_sector_weight,
         use_volatility_targeting=not args.disable_volatility_targeting,
+        use_score_weighting=not args.disable_score_weighting,
+        use_long_short=not args.disable_long_short,
     )
     pipeline = TradingResearchPipeline(config)
     results = pipeline.run()
@@ -302,6 +314,8 @@ def main() -> None:
         "rebalance_frequency": args.rebalance_frequency,
         "max_sector_weight": args.max_sector_weight,
         "use_volatility_targeting": bool(not args.disable_volatility_targeting),
+        "use_score_weighting": bool(not args.disable_score_weighting),
+        "use_long_short": bool(not args.disable_long_short),
         "universe_file": str(args.universe_file),
         "requested_tickers_count": int(requested_tickers_count),
         "downloaded_tickers_count": int(downloaded_tickers_count),
@@ -349,6 +363,8 @@ def main() -> None:
                 sector_by_ticker=sector_by_ticker,
                 max_sector_weight=args.max_sector_weight,
                 use_volatility_targeting=not args.disable_volatility_targeting,
+                use_score_weighting=not args.disable_score_weighting,
+                use_long_short=not args.disable_long_short,
             )
             robustness_results = TradingResearchPipeline(robustness_config).run()
             robustness_perf = robustness_results["performance"]
